@@ -40,11 +40,12 @@ OF_ENABLE_ALL_PARTITION_TOOLS := 1
 OF_USE_DMCTL := 1
 OF_QUICK_BACKUP_LIST := /boot;/data;
 OF_ENABLE_FRP_ADDON := 1
-# MT6360 exposes two torch LED class devices.  OrangeFox appends
-# /brightness and /max_brightness to these paths; the old value
+# MT6360 exposes torch LED class devices.  OrangeFox appends
+# /brightness and /max_brightness to this path; the old value
 # (/system/etc/flashlight) was not a LED directory and made the toggle fail.
-OF_FL_PATH1 := /sys/class/leds/torch-light0
-OF_FL_PATH2 := /sys/class/leds/torch-light1
+# Only ONE torch path must be set: having both OF_FL_PATH1 and OF_FL_PATH2
+# causes the two channels to disable each other (flashlight dims instead of off).
+OF_FL_PATH1 := /sys/class/leds/torch-light1
 OF_DISABLE_OTA_MENU := 1
 OF_USE_LEGACY_BATTERY_SERVICES := 1
 OF_USE_GREEN_LED := 0
