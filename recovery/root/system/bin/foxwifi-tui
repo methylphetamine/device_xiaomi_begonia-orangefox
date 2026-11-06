@@ -1,0 +1,173 @@
+#!/system/bin/sh
+#
+# foxwifi-tui - minimal ANSI WiFi TUI for OrangeFox recovery (begonia).
+# Uses foxwifi backend (MTK WMT/wpa_supplicant). Run from recovery terminal.
+#
+PATH=/sbin:/system/bin:/system/xbin:/vendor/bin
+export PATH
+FOXWIFI=/system/bin/foxwifi
+[ -x "$FOXWIFI" ] || FOXWIFI=foxwifi
+
+ESC=$(printf '\033')
+BOLD="${ESC}[1m"; DIM="${ESC}[2m"; REV="${ESC}[7m"; NORM="${ESC}[0m"
+RED="${ESC}[31m"; GREEN="${ESC}[32m"; YELLOW="${ESC}[33m"; CYAN="${ESC}[36m"
+
+state_file=/tmp/foxwifi-tui.state
+mkdir -p /tmp 2>/dev/null
+MSG=
+
+cleanup() { stty echo icanon 2>/dev/null; printf '%s' "${NORM}${ESC}[?25h${ESC}[0m${ESC}[2J${ESC}[H"; }
+trap cleanup EXIT INT TERM
+
+json_get() {
+  key=$1
+  sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p; s/.*"'"$key"'"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p' | head -n 1
+}
+
+status_json() { "$FOXWIFI" status --json 2>/dev/null; }
+scan_json() { "$FOXWIFI" scan --json 2>/dev/null; }
+
+draw_box() {
+  title="$1"; shift
+  printf '%s' "${ESC}[2J${ESC}[H${BOLD}${CYAN}foxwifi-tui${NORM} ${DIM}- OrangeFox WiFi (begonia)${NORM}
+"
+  printf '%s\n' "${BOLD}${title}${NORM}"
+  printf '%s\n' "------------------------------------------------------------"
+  for l in "$@"; do printf '%s\n' "$l"; done
+  if [ -n "$MSG" ]; then printf '\n%s\n' "${YELLOW}${MSG}${NORM}"; MSG=; fi
+}
+
+wait_key() {
+  printf '%s' "${DIM}${1:-Press any key to continue...}${NORM}"
+  stty -icanon min 1 time 0 2>/dev/null
+  dd bs=1 count=1 2>/dev/null >/dev/null || IFS= read -r _ || true
+  stty icanon echo 2>/dev/null
+  printf '\n'
+}
+
+prompt() {
+  prompt_text=$1; default=$2; secret=$3
+  if [ -n "$default" ]; then printf '%s [%s]: ' "$prompt_text" "$default"; else printf '%s: ' "$prompt_text"; fi
+  stty icanon echo 2>/dev/null
+  [ "$secret" = 1 ] && stty -echo 2>/dev/null
+  IFS= read -r ans || ans=
+  [ "$secret" = 1 ] && { stty echo 2>/dev/null; printf '\n'; }
+  [ -z "$ans" ] && ans=$default
+  printf '%s' "$ans"
+}
+
+scan_list() {
+  scan_json 2>/dev/null | tr '{' '\n' | sed -n \
+    -e 's/.*"ssid":"\([^"]*\)".*"signal":\(-*[0-9][0-9]*\).*"security":"\([^"]*\)".*/\1	\3	\2/p' \
+    -e 's/.*"ssid":"\([^"]*\)".*"security":"\([^"]*\)".*"signal":\(-*[0-9][0-9]*\).*/\1	\2	\3/p' \
+    | awk -F'	' '!seen[$1]++ && $1!="" {n++; printf "%d\t%s\t%s\t%s\n", n,$1,$2,$3}' > "$state_file"
+}
+
+pick_network() {
+  MSG="Scanning..."
+  draw_box "Scan" "Please wait..."
+  scan_list
+  if [ ! -s "$state_file" ]; then
+    MSG="No networks found (or WiFi not ready). Try Enable WiFi."
+    return 1
+  fi
+  while :; do
+    draw_box "Available networks"
+    while IFS=$(printf '\t') read -r n ss sec sig; do
+      [ -n "$n" ] || continue
+      printf ' %2s) %-28s %-5s %s dBm\n' "$n" "$ss" "$sec" "$sig"
+    done < "$state_file"
+    printf '\n'
+    choice=$(prompt "Select number, r=rescan, b=back" "" 0)
+    case "$choice" in
+      b|B|"") return 1 ;;
+      r|R) MSG="Scanning..."; draw_box "Scan" "Please wait..."; scan_list ;;
+      *[!0-9]*) MSG="Enter a number, r, or b" ;;
+      *)
+        sel=$(awk -F'	' -v n="$choice" '$1==n {print; exit}' "$state_file")
+        [ -n "$sel" ] || { MSG="Invalid selection"; continue; }
+        SEL_SSID=$(printf '%s' "$sel" | awk -F'	' '{print $2}')
+        SEL_SEC=$(printf '%s' "$sel" | awk -F'	' '{print $3}')
+        return 0
+        ;;
+    esac
+  done
+}
+
+connect_flow() {
+  pick_network || { wait_key; return; }
+  draw_box "Connect" "SSID     : $SEL_SSID" "Security : $SEL_SEC"
+  psk=""
+  if [ "$SEL_SEC" != "OPEN" ]; then
+    psk=$(prompt "Password (hidden)" "" 1)
+    [ -n "$psk" ] || { MSG="Password required for $SEL_SEC"; wait_key; return; }
+  fi
+  save=$(prompt "Save to /sdcard/Fox/wifi.conf? (y/N)" "N" 0)
+  draw_box "Connect" "Connecting to $SEL_SSID ..."
+  out=$("$FOXWIFI" connect "$SEL_SSID" "$psk" "$SEL_SEC" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    case "$save" in y|Y) "$FOXWIFI" save >/dev/null 2>&1 || true ;; esac
+    MSG="Connected. $(printf '%s' "$out" | tail -n 1)"
+  else
+    MSG="Connect failed: $(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')"
+  fi
+  wait_key
+}
+
+manual_connect() {
+  draw_box "Manual connect"
+  ssid=$(prompt "SSID" "" 0)
+  [ -n "$ssid" ] || return
+  sec=$(prompt "Security (OPEN/WPA/WPA2/WPA3)" "WPA2" 0)
+  psk=""
+  [ "$sec" = "OPEN" ] || psk=$(prompt "Password (hidden)" "" 1)
+  draw_box "Connect" "Connecting to $ssid ..."
+  out=$("$FOXWIFI" connect "$ssid" "$psk" "$sec" 2>&1); rc=$?
+  if [ "$rc" -eq 0 ]; then MSG="Connected."; else MSG="Failed: $(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')"; fi
+  wait_key
+}
+
+main_menu() {
+  while :; do
+    j=$(status_json)
+    st=$(printf '%s' "${j:-{}}" | json_get state)
+    ss=$(printf '%s' "${j:-{}}" | json_get ssid)
+    ip=$(printf '%s' "${j:-{}}" | json_get ip)
+    summary="${st:-unknown}"
+    [ -n "$ss" ] && summary="$summary  SSID=$ss"
+    [ -n "$ip" ] && summary="$summary  IP=$ip"
+    draw_box "Main menu" \
+      "Status: $summary" "" \
+      "  1) Enable WiFi        (foxwifi on)" \
+      "  2) Disable WiFi       (foxwifi off)" \
+      "  3) Scan and connect" \
+      "  4) Manual connect" \
+      "  5) Disconnect" \
+      "  6) Auto-connect saved" \
+      "  7) Save current network" \
+      "  8) Forget saved network" \
+      "  9) Show status" \
+      "  l) View log" \
+      "  q) Quit"
+    c=$(prompt "Choice" "" 0)
+    case "$c" in
+      1) draw_box "WiFi" "Starting..."; out=$("$FOXWIFI" on 2>&1); MSG=$(printf '%s' "$out" | tail -n 2 | tr '\n' ' ');;
+      2) draw_box "WiFi" "Stopping..."; out=$("$FOXWIFI" off 2>&1); MSG=$(printf '%s' "$out" | tail -n 2 | tr '\n' ' ');;
+      3) connect_flow ;;
+      4) manual_connect ;;
+      5) out=$("$FOXWIFI" disconnect 2>&1); MSG=$(printf '%s' "$out" | tail -n 1);;
+      6) draw_box "WiFi" "Auto-connect..."; out=$("$FOXWIFI" auto 2>&1); MSG=$(printf '%s' "$out" | tail -n 2 | tr '\n' ' '); wait_key;;
+      7) out=$("$FOXWIFI" save 2>&1); MSG=$(printf '%s' "$out" | tail -n 1);;
+      8) out=$("$FOXWIFI" forget 2>&1); MSG=$(printf '%s' "$out" | tail -n 1);;
+      9) draw_box "Status" "$("$FOXWIFI" status 2>&1)"; wait_key ;;
+      l|L) draw_box "foxwifi log" "$("$FOXWIFI" log 60 2>&1)"; wait_key ;;
+      q|Q) exit 0 ;;
+      "") ;;
+      *) MSG="Unknown choice: $c" ;;
+    esac
+  done
+}
+
+[ -t 0 ] || echo "foxwifi-tui: stdin is not a terminal; continuing anyway"
+printf '%s' "${ESC}[?25l"
+main_menu

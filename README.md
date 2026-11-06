@@ -312,3 +312,13 @@ this build, so prefer `curl` for HTTPS.
 - Wireless ADB listens on TCP 5555 without transport encryption and trusts
   the computer's existing ADB key.  Do not enable it on an untrusted network,
   and run `foxadb off` when finished.
+
+## WiFi TUI (experiment/wifi-tui)
+
+`recovery/root/system/bin/foxwifi-tui` is a minimal ANSI terminal UI over the existing `foxwifi` backend (MTK WMT/wpa_supplicant on begonia). Run it from the OrangeFox terminal/ADB shell:
+
+```sh
+foxwifi-tui
+```
+
+Features: enable/disable WiFi, scan and connect (OPEN/WPA/WPA2/WPA3), manual connect, disconnect, auto-connect/save/forget (`/sdcard/Fox/wifi.conf`), status, and log view. It depends on `foxwifi`/`wpa_supplicant`/firmware already included in the recovery ramdisk.
