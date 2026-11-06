@@ -83,15 +83,39 @@ new_token() {
 	sed -n 's/.*"token":"\([^"]*\)".*/\1/p'
 }
 
+# Recover a sane epoch from the GoFile server Date header when the
+# recovery clock is wrong (common in TWRP/OrangeFox without RTC/NTP).
+server_epoch() {
+	_d=$($CURL -sSI --max-time 15 "$API/accounts" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="date:"{sub(/^[Dd]ate: */,""); print; exit}')
+	[ -n "$_d" ] || { echo 0; return; }
+	_e=$(date -u -d "$_d" +%s 2>/dev/null) && [ -n "$_e" ] && { echo "$_e"; return; }
+	_e=$(busybox date -u -D '%a, %d %b %Y %H:%M:%S %Z' -d "$_d" +%s 2>/dev/null) && [ -n "$_e" ] && { echo "$_e"; return; }
+	echo 0
+}
+
+init_epoch() {
+	EPOCH=$(date -u +%s 2>/dev/null)
+	case "$EPOCH" in ''|*[!0-9]*) EPOCH=0 ;; esac
+	# 2024-01-01: anything older means the recovery clock is unset.
+	if [ "$EPOCH" -lt 1704067200 ]; then
+		_se=$(server_epoch)
+		case "$_se" in ''|*[!0-9]*) _se=0 ;; esac
+		if [ "$_se" -ge 1704067200 ]; then
+			warn "recovery clock looks wrong; using GoFile server time"
+			EPOCH="$_se"
+		fi
+	fi
+}
+
 wt_for() { # token window_offset
 	printf '%s::%s::%s::%s::%s' \
-		"$UA" "$BL" "$1" "$(( $(date +%s) / WINDOW + $2 ))" "$SALT" |
+		"$UA" "$BL" "$1" "$(( EPOCH / WINDOW + $2 ))" "$SALT" |
 	sha256sum | cut -d' ' -f1
 }
 
 api_contents() { # id wt
 	_q="?contentFilter=&page=1&pageSize=1000&sortField=createTime&sortDirection=-1"
-	[ -n "$PASSHASH" ] && _q="$_q&password=$PASSHASH"
+	[ -n "${PASSHASH-}" ] && _q="$_q&password=$PASSHASH"
 	$CURL --max-time 60 \
 		-H "Authorization: Bearer $TOK" \
 		-H "X-Website-Token: $2" \
@@ -105,11 +129,16 @@ api_contents() { # id wt
 
 fetch_contents() { # id -> json
 	_try=0
-	while [ "$_try" -lt 3 ]; do
+	# try current + neighboring 4h windows to tolerate residual clock skew
+	while [ "$_try" -lt 7 ]; do
 		case $_try in
 			0) _off=0 ;;
 			1) _off=-1 ;;
-			*) _off=1 ;;
+			2) _off=1 ;;
+			3) _off=-2 ;;
+			4) _off=2 ;;
+			5) _off=-3 ;;
+			*) _off=3 ;;
 		esac
 		_json=$(api_contents "$1" "$(wt_for "$TOK" "$_off")")
 		_st=$(json_status "$_json")
@@ -325,6 +354,7 @@ case "$ID" in
 esac
 
 msg "gofile: content $ID"
+init_epoch
 TOK=$(new_token)
 [ -n "$TOK" ] || die "could not create a guest session (WiFi/DNS/clock?)"
 
@@ -333,7 +363,7 @@ if [ -n "$PASS" ]; then
 fi
 
 ROOT_JSON=$(fetch_contents "$ID") ||
-	die "cannot fetch content ($LAST_STATUS) - if the recovery clock is wrong, fix the date and retry"
+	die "cannot fetch content ($LAST_STATUS) - check WiFi, link, or recovery date/time (Settings > Date/Time)"
 
 case "$ROOT_JSON" in
 	*'"canAccess":false'*)
